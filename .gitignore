@@ -1,0 +1,16 @@
+# 运行时生成的用户配置，不纳入版本控制
+config.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 本地收集的图片（若 save_dir 指向项目内）
+collected/
+
+# 编辑器
+.idea/
+.vscode/
