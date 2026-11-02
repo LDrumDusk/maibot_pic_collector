@@ -2,9 +2,10 @@
 
 功能概述：
 - 通过 ``chat.receive.after_process`` Hook（OBSERVE 模式，只读、不阻塞主流程）捕获图片消息；
-  此时主程序已完成图片识别。识别文字优先取消息段 ``data``（形如 ``[图片：描述]``），
-  但主程序实际把 VLM 结果写入 ``images.description``（纯图片消息段 ``data`` 通常为空），
-  因此为空时按 hash 从主库 ``data/MaiBot.db`` 的 ``images`` 表读取。
+  主程序的图片识别是异步后台任务，此时可能尚未完成，插件会按 hash 轮询主库
+  ``data/MaiBot.db`` 的 ``images`` 表等待识别文字（最多 ``filter.wait_description_sec`` 秒）。
+  识别文字优先取消息段 ``data``（形如 ``[图片：描述]``），但主程序实际把 VLM 结果写入
+  ``images.description``（纯图片消息段 ``data`` 通常为空），因此为空时按 hash 从主库读取。
 - 用「文字 LLM（回复模型 replyer）」判断识别文字是否符合筛选条件，不耗视觉 token。
   筛选依据（``[filter]`` 配置节，可组合）：
   - persona：按 bot 人设（``personality.personality``）判断图片是否值得保存；
@@ -136,6 +137,16 @@ class FilterSectionConfig(PluginConfigBase):
         default=60,
         description="每分钟最多调用 LLM 判断的次数（防刷限流）",
         json_schema_extra=_ui("每分钟判断上限", "防止图片刷屏时耗尽 LLM 配额"),
+    )
+    wait_description_sec: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=120.0,
+        description="等待主程序图片识别完成的超时时间（秒）",
+        json_schema_extra=_ui(
+            "等待识别超时(秒)",
+            "图片识别是异步后台任务，插件会轮询等待最多这么久再判定",
+        ),
     )
 
 
@@ -538,23 +549,28 @@ class PicCollectorPlugin(MaiBotPlugin):
     async def _get_image_description(self, seg: dict[str, Any], image_hash: str) -> str:
         """取识别文字：优先消息段 data（去掉 [图片：] 前缀），为空则按 hash 从主库读取。
 
-        主程序实际把 VLM 识别结果写入 ``images.description``，而不是消息段的 ``data``
-        （纯图片消息段 data 通常为空）。VLM 可能在 after_process 前后才写回，做几次短重试。
-        返回空字符串表示没有可用的识别文字（调用方应跳过）。
+        主程序把 VLM 识别结果写入 ``images.description``，但图片理解是**异步后台任务**，
+        在 ``chat.receive.after_process``（HeartFlow 阶段之前）触发时通常尚未完成。
+        因此这里按 hash 轮询主库，最多等待 ``filter.wait_description_sec`` 秒；
+        OBSERVE 模式下本协程是独立后台任务，等待不会阻塞主流程。
+
+        返回空字符串表示超时仍无识别文字（调用方应跳过，不保存）。
         """
         desc = strip_image_prefix(str(seg.get("data") or ""))
         if desc:
             return desc
         db_path = self._resolve_main_db_path()
-        for attempt in range(3):
+        timeout = max(1.0, float(self.config.filter.wait_description_sec))
+        deadline = time.monotonic() + timeout
+        while True:
             desc = await asyncio.to_thread(
                 self._read_image_description_sync, db_path, image_hash
             )
             if desc:
                 return desc
-            if attempt < 2:
-                await asyncio.sleep(0.5)
-        return ""
+            if time.monotonic() >= deadline:
+                return ""
+            await asyncio.sleep(0.5)
 
     @staticmethod
     def _read_host_image_bytes(host_data_dir: Path, image_hash: str) -> bytes | None:
@@ -730,7 +746,11 @@ class PicCollectorPlugin(MaiBotPlugin):
         image_segments = list(self._iter_image_segments(message))
         if not image_segments:
             return None
-        self.ctx.logger.info("图片收藏：收到 %d 个图片段（群=%s，发送者=%s）", len(image_segments), group_id or "-", sender_id or "-")
+        self.ctx.logger.info(
+            "图片收藏：收到 %d 个图片段（群=%s，发送者=%s，等待识别最多 %.0f 秒）",
+            len(image_segments), group_id or "-", sender_id or "-",
+            max(1.0, float(self.config.filter.wait_description_sec)),
+        )
 
         for seg in image_segments:
             image_hash = str(seg.get("hash") or "").strip().lower()
@@ -741,10 +761,13 @@ class PicCollectorPlugin(MaiBotPlugin):
                 self.ctx.logger.debug("图片 %s 已收藏过，跳过", image_hash[:12])
                 continue
 
-            # 识别文字：优先段 data，其次按 hash 从主库 images 表读取；为空则跳过
+            # 识别文字：优先段 data，其次按 hash 从主库 images 表轮询等待；超时仍空则跳过
             description = await self._get_image_description(seg, image_hash)
             if not description:
-                self.ctx.logger.info("图片 %s 识别文字为空，跳过（不保存）", image_hash[:12])
+                self.ctx.logger.info(
+                    "图片 %s 识别文字等待超时（%.0f 秒）仍为空，跳过（不保存）",
+                    image_hash[:12], max(1.0, float(self.config.filter.wait_description_sec)),
+                )
                 continue
 
             if not self._acquire_judge_slot():

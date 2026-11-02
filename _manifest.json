@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "com.maimai.pic-collector",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "聊天图片收藏",
   "description": "有选择性地保存聊天记录图片：根据 bot 人设或用户自定义要求，用文字 LLM（回复模型）判断主程序已生成的图片识别文字，符合条件的原图按日期保存到指定目录，保存后随机发送一条通知。",
   "author": {

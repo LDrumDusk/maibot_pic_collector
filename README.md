@@ -45,6 +45,8 @@ group_whitelist = []
 group_blacklist = []
 # 每分钟最多调用 LLM 判断次数（防刷限流）
 max_judge_per_minute = 60
+# 等待主程序图片识别完成的超时时间（秒）；图片识别是异步任务，插件会轮询等待
+wait_description_sec = 30.0
 
 [storage]
 # 图片保存目录（绝对路径，如 "D:/pics"）；留空则保存到插件数据目录 collected/ 下
@@ -71,6 +73,7 @@ command_whitelist = []
 - `save_dir` 留空时保存到插件数据目录 `data/plugins/com.maimai.pic-collector/collected/`（随项目走，免配置即可用）；填绝对路径则保存到指定目录。
 - `group_whitelist` / `group_blacklist` 只在群聊时生效；私聊消息不受群名单影响。
 - `max_judge_per_minute` 防止图片刷屏时频繁调用 LLM 判断。
+- `wait_description_sec`：主程序的图片识别是**异步后台任务**，`chat.receive.after_process` 触发时可能还没完成；插件会按 hash 轮询主库 `data/MaiBot.db` 的 `images` 表等待识别文字，最多等这么久（默认 30 秒）。超时仍无识别文字则跳过该图（不保存）。
 - 人设、bot 账号读取自主程序 `bot_config.toml`（`personality.personality`、`bot.qq_account`、`bot.platforms`），变化时插件自动刷新。
 
 ---
